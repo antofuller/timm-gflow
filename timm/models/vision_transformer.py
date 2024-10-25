@@ -57,24 +57,24 @@ _logger = logging.getLogger(__name__)
 
 
 class Attention(nn.Module):
-    fused_attn: Final[bool]
+    fused_attn: bool
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = False,
-            qk_norm: bool = False,
-            attn_drop: float = 0.,
-            proj_drop: float = 0.,
-            norm_layer: nn.Module = nn.LayerNorm,
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.,
+        proj_drop: float = 0.,
+        norm_layer: nn.Module = nn.LayerNorm,
     ) -> None:
         super().__init__()
         assert dim % num_heads == 0, 'dim should be divisible by num_heads'
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.fused_attn = use_fused_attn()
+        self.fused_attn = False  # Set this based on your requirements
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
@@ -83,27 +83,62 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        skip_proj: bool = False,
+        skip_heads: List[int] = []
+    ) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv.unbind(0)
+
+        # Compute qkv
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)  # (3, B, num_heads, N, head_dim)
+        q, k, v = qkv.unbind(0)  # Each is (B, num_heads, N, head_dim)
         q, k = self.q_norm(q), self.k_norm(k)
 
+        # Create masks for kept and skipped heads
+        mask = torch.ones(self.num_heads, dtype=torch.bool, device=x.device)
+        if skip_heads:
+            mask[skip_heads] = False
+        kept_heads = mask.nonzero(as_tuple=False).squeeze(-1)
+        skipped_heads = (~mask).nonzero(as_tuple=False).squeeze(-1)
+
+        # Compute attention for kept heads
+        q_kept = q[:, kept_heads, :, :]  # (B, num_kept_heads, N, head_dim)
+        k_kept = k[:, kept_heads, :, :]
+        v_kept = v[:, kept_heads, :, :]
+
         if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q, k, v,
+            x_kept = F.scaled_dot_product_attention(
+                q_kept, k_kept, v_kept,
                 dropout_p=self.attn_drop.p if self.training else 0.,
             )
         else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
+            q_kept = q_kept * self.scale
+            attn = q_kept @ k_kept.transpose(-2, -1)
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
-            x = attn @ v
+            x_kept = attn @ v_kept  # (B, num_kept_heads, N, head_dim)
 
-        x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
+        # For skipped heads, use the input values directly
+        # Reshape x to match head dimensions
+        x_heads = x.reshape(B, N, self.num_heads, self.head_dim)
+        x_heads = x_heads.permute(0, 2, 1, 3)  # (B, num_heads, N, head_dim)
+        x_skipped = x_heads[:, skipped_heads, :, :]  # (B, num_skipped_heads, N, head_dim)
+
+        # Reconstruct x_full by combining kept and skipped heads
+        x_full = torch.empty(B, self.num_heads, N, self.head_dim, device=x.device, dtype=x.dtype)
+        x_full[:, kept_heads, :, :] = x_kept
+        x_full[:, skipped_heads, :, :] = x_skipped
+
+        # Continue with the forward pass
+        x = x_full.transpose(1, 2).reshape(B, N, C)
+
+        # Optionally skip the projection layer
+        if not skip_proj:
+            x = self.proj(x)
+            x = self.proj_drop(x)
         return x
 
 
