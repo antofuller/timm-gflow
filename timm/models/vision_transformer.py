@@ -162,10 +162,10 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x: torch.Tensor, skip_dict) -> torch.Tensor:
-        if not skip_dict["skip_attn"]:
+    def forward(self, x: torch.Tensor, do_attn, do_mlp) -> torch.Tensor:
+        if do_attn:
             x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
-        if not skip_dict["skip_mlp"]:
+        if do_mlp:
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
 
@@ -802,14 +802,14 @@ class VisionTransformer(nn.Module):
             intermediates_only=True,
         )
 
-    def forward_features(self, x: torch.Tensor, all_skip_dict) -> torch.Tensor:
+    def forward_features(self, x: torch.Tensor, do_attns, do_mlps) -> torch.Tensor:
         x = self.patch_embed(x)
         x = self._pos_embed(x)
         x = self.patch_drop(x)
         x = self.norm_pre(x)
 
         for i, block in enumerate(self.blocks):
-            x = block(x, skip_dict=all_skip_dict[i])
+            x = block(x, do_attn=do_attns[i], do_mlp=do_mlps[i])
 
         x = self.norm(x)
         return x
@@ -828,8 +828,8 @@ class VisionTransformer(nn.Module):
         x = self.head_drop(x)
         return x if pre_logits else self.head(x)
 
-    def forward(self, x: torch.Tensor, all_skip_dict) -> torch.Tensor:
-        x = self.forward_features(x, all_skip_dict)
+    def forward(self, x: torch.Tensor, do_attns, do_mlps) -> torch.Tensor:
+        x = self.forward_features(x, do_attns, do_mlps)
         x = self.forward_head(x)
         return x
 
