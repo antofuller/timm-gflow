@@ -1,3 +1,3 @@
 # Group 2: Pruning ViTs with GFlowNets
 
-https://colab.research.google.com/drive/1J763_zKDpOisCE2jadpY9To9ZkNATcYo?usp=sharing
+[Trajectory balance is now working!](https://colab.research.google.com/drive/1X_cJz4M5KLg9DOZguzbL-yKEre_pfA25?usp=sharing)
